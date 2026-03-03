@@ -1,0 +1,1038 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Claude Token Tracker</title>
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4"></script>
+<style>
+:root {
+  --bg: #0f0f1a;
+  --card: #1a1a2e;
+  --card-hover: #222240;
+  --border: #2a2a4a;
+  --primary: #7c3aed;
+  --primary-light: #a78bfa;
+  --secondary: #3b82f6;
+  --success: #10b981;
+  --warning: #f59e0b;
+  --danger: #ef4444;
+  --text: #e2e8f0;
+  --text-dim: #94a3b8;
+  --text-muted: #64748b;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+  min-height: 100vh;
+  line-height: 1.5;
+}
+
+.header {
+  background: linear-gradient(135deg, #1a1a2e 0%, #16213e 100%);
+  border-bottom: 1px solid var(--border);
+  padding: 1rem 2rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: sticky;
+  top: 0;
+  z-index: 100;
+}
+
+.header h1 {
+  font-size: 1.4rem;
+  background: linear-gradient(135deg, var(--primary-light), var(--secondary));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
+}
+
+.header-right {
+  display: flex;
+  align-items: center;
+  gap: 1rem;
+}
+
+.header-right .last-updated {
+  color: var(--text-muted);
+  font-size: 0.8rem;
+}
+
+.btn {
+  background: var(--primary);
+  color: white;
+  border: none;
+  padding: 0.4rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.85rem;
+  transition: background 0.2s;
+}
+.btn:hover { background: #6d28d9; }
+.btn-outline {
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-dim);
+}
+.btn-outline:hover { background: var(--card); color: var(--text); }
+.btn-outline.active { background: var(--primary); color: white; border-color: var(--primary); }
+
+.container {
+  max-width: 1400px;
+  margin: 0 auto;
+  padding: 1.5rem;
+}
+
+/* KPI Cards */
+.kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(220px, 1fr));
+  gap: 1rem;
+  margin-bottom: 1.5rem;
+}
+
+.kpi-card {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.2rem;
+  position: relative;
+  overflow: hidden;
+}
+
+.kpi-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 3px;
+}
+.kpi-card.purple::before { background: var(--primary); }
+.kpi-card.blue::before { background: var(--secondary); }
+.kpi-card.green::before { background: var(--success); }
+.kpi-card.amber::before { background: var(--warning); }
+
+.kpi-label {
+  font-size: 0.8rem;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  margin-bottom: 0.3rem;
+}
+
+.kpi-value {
+  font-size: 1.8rem;
+  font-weight: 700;
+  line-height: 1.2;
+}
+
+.kpi-sub {
+  font-size: 0.75rem;
+  color: var(--text-dim);
+  margin-top: 0.3rem;
+}
+
+/* Chart sections */
+.section {
+  background: var(--card);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 1.2rem;
+  margin-bottom: 1.5rem;
+}
+
+.section-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.section-title {
+  font-size: 1rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.section-controls {
+  display: flex;
+  gap: 0.5rem;
+}
+
+/* Two-column layout */
+.two-col {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 1.5rem;
+  margin-bottom: 1.5rem;
+}
+
+@media (max-width: 900px) {
+  .two-col { grid-template-columns: 1fr; }
+}
+
+/* Tables */
+table {
+  width: 100%;
+  border-collapse: collapse;
+  font-size: 0.85rem;
+}
+
+th, td {
+  text-align: left;
+  padding: 0.6rem 0.8rem;
+  border-bottom: 1px solid var(--border);
+}
+
+th {
+  color: var(--text-muted);
+  font-weight: 600;
+  text-transform: uppercase;
+  font-size: 0.7rem;
+  letter-spacing: 0.05em;
+  cursor: pointer;
+  user-select: none;
+}
+
+th:hover { color: var(--text-dim); }
+th.sorted-asc::after { content: ' \u25B2'; }
+th.sorted-desc::after { content: ' \u25BC'; }
+
+tr:hover td { background: rgba(124, 58, 237, 0.05); }
+
+.text-right { text-align: right; }
+.text-muted { color: var(--text-muted); }
+.text-success { color: var(--success); }
+.text-purple { color: var(--primary-light); }
+.text-blue { color: var(--secondary); }
+.text-warning { color: var(--warning); }
+
+.mono { font-family: 'SF Mono', 'Cascadia Code', 'Consolas', monospace; font-size: 0.8rem; }
+
+.session-row { cursor: pointer; }
+.session-row:hover td { background: rgba(124, 58, 237, 0.1); }
+
+.session-detail {
+  display: none;
+  background: rgba(15, 15, 26, 0.5);
+}
+
+.session-detail.open { display: table-row; }
+
+.session-detail td {
+  padding: 0.5rem 0.8rem 0.5rem 2rem;
+}
+
+.session-detail table {
+  font-size: 0.78rem;
+}
+
+.prompt-text {
+  max-width: 300px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.filter-bar {
+  display: flex;
+  gap: 0.8rem;
+  align-items: center;
+  margin-bottom: 1rem;
+  flex-wrap: wrap;
+}
+
+.filter-bar select, .filter-bar input {
+  background: var(--bg);
+  border: 1px solid var(--border);
+  color: var(--text);
+  padding: 0.4rem 0.8rem;
+  border-radius: 6px;
+  font-size: 0.85rem;
+}
+
+.filter-bar input {
+  min-width: 200px;
+}
+
+.savings-banner {
+  background: linear-gradient(135deg, rgba(16, 185, 129, 0.1), rgba(16, 185, 129, 0.05));
+  border: 1px solid rgba(16, 185, 129, 0.3);
+  border-radius: 10px;
+  padding: 1rem 1.5rem;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 1rem;
+}
+
+.savings-amount {
+  font-size: 1.4rem;
+  font-weight: 700;
+  color: var(--success);
+}
+
+.savings-label {
+  font-size: 0.85rem;
+  color: var(--text-dim);
+}
+
+.loading {
+  text-align: center;
+  padding: 3rem;
+  color: var(--text-muted);
+}
+
+.chart-container {
+  position: relative;
+  height: 300px;
+}
+
+.chart-container-sm {
+  position: relative;
+  height: 250px;
+}
+
+.note {
+  font-size: 0.75rem;
+  color: var(--text-muted);
+  margin-top: 0.5rem;
+  font-style: italic;
+}
+
+.badge {
+  display: inline-block;
+  padding: 0.15rem 0.5rem;
+  border-radius: 10px;
+  font-size: 0.7rem;
+  font-weight: 600;
+}
+.badge-purple { background: rgba(124, 58, 237, 0.2); color: var(--primary-light); }
+.badge-blue { background: rgba(59, 130, 246, 0.2); color: var(--secondary); }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Claude Token Tracker</h1>
+  <div class="header-right">
+    <span class="last-updated" id="lastUpdated">Loading...</span>
+    <button class="btn-outline" id="autoRefreshBtn" onclick="toggleAutoRefresh()">Auto-refresh: OFF</button>
+    <button class="btn" onclick="refreshAll()">Refresh</button>
+  </div>
+</div>
+
+<div class="container">
+  <!-- Time Range Selector -->
+  <div class="section" style="padding: 0.8rem 1.2rem; margin-bottom: 1rem;">
+    <div style="display: flex; align-items: center; gap: 1rem;">
+      <span class="section-title" style="margin: 0; white-space: nowrap;">Time Range</span>
+      <div class="section-controls">
+        <button class="btn-outline" id="rangeDaily" onclick="setTimeRange('daily')">Today</button>
+        <button class="btn-outline" id="rangeWeekly" onclick="setTimeRange('weekly')">This Week</button>
+        <button class="btn-outline" id="rangeMonthly" onclick="setTimeRange('monthly')">This Month</button>
+        <button class="btn-outline active" id="rangeAll" onclick="setTimeRange('all')">All Time</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- KPI Cards -->
+  <div class="kpi-grid">
+    <div class="kpi-card purple">
+      <div class="kpi-label">Total Tokens</div>
+      <div class="kpi-value" id="kpiTokens">-</div>
+      <div class="kpi-sub" id="kpiTokensSub">-</div>
+    </div>
+    <div class="kpi-card blue">
+      <div class="kpi-label">Est. API Cost</div>
+      <div class="kpi-value" id="kpiCost">-</div>
+      <div class="kpi-sub" id="kpiCostSub">-</div>
+    </div>
+    <div class="kpi-card green">
+      <div class="kpi-label">Cache Savings</div>
+      <div class="kpi-value text-success" id="kpiSavings">-</div>
+      <div class="kpi-sub" id="kpiSavingsSub">-</div>
+    </div>
+    <div class="kpi-card amber">
+      <div class="kpi-label">Sessions</div>
+      <div class="kpi-value" id="kpiSessions">-</div>
+      <div class="kpi-sub" id="kpiSessionsSub">-</div>
+    </div>
+  </div>
+
+  <!-- Daily Usage Chart -->
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">Daily Usage</span>
+      <div class="section-controls">
+        <button class="btn-outline active" id="dailyTokensBtn" onclick="setDailyView('tokens')">Tokens</button>
+        <button class="btn-outline" id="dailyCostBtn" onclick="setDailyView('cost')">Cost</button>
+        <button class="btn-outline" id="dailyNoCache" onclick="toggleDailyCache()">Exclude Cache Reads</button>
+      </div>
+    </div>
+    <div class="chart-container"><canvas id="dailyChart"></canvas></div>
+  </div>
+
+  <!-- Two column: Model + Cache -->
+  <div class="two-col">
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">Model Breakdown</span>
+      </div>
+      <div class="chart-container-sm"><canvas id="modelChart"></canvas></div>
+      <table id="modelTable" style="margin-top:1rem">
+        <thead><tr>
+          <th>Model</th>
+          <th class="text-right">Requests</th>
+          <th class="text-right">Cost</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+    </div>
+
+    <div class="section">
+      <div class="section-header">
+        <span class="section-title">Cache Efficiency</span>
+      </div>
+      <div id="cacheSavingsBanner" class="savings-banner" style="margin-bottom:1rem">
+        <div>
+          <div class="savings-label">Cache saves you</div>
+          <div class="savings-amount" id="cacheSavingsVal">-</div>
+        </div>
+        <div style="text-align:right">
+          <div class="savings-label">Hit Rate</div>
+          <div style="font-size:1.4rem;font-weight:700;color:var(--secondary)" id="cacheHitRateVal">-</div>
+        </div>
+      </div>
+      <div class="chart-container-sm"><canvas id="cacheChart"></canvas></div>
+    </div>
+  </div>
+
+  <!-- Activity by Hour -->
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">Activity by Hour of Day</span>
+    </div>
+    <div class="chart-container-sm"><canvas id="hourlyChart"></canvas></div>
+  </div>
+
+  <!-- Projects -->
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">Projects</span>
+    </div>
+    <table id="projectTable">
+      <thead><tr>
+        <th>Project</th>
+        <th class="text-right">Sessions</th>
+        <th class="text-right">Requests</th>
+        <th class="text-right">Input</th>
+        <th class="text-right">Output</th>
+        <th class="text-right">Cache Read</th>
+        <th class="text-right">Cost</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+  </div>
+
+  <!-- Sessions -->
+  <div class="section">
+    <div class="section-header">
+      <span class="section-title">Sessions</span>
+    </div>
+    <div class="filter-bar">
+      <select id="sessionProjectFilter" onchange="filterSessions()">
+        <option value="">All Projects</option>
+      </select>
+      <input type="text" id="sessionSearch" placeholder="Search prompts..." oninput="filterSessions()">
+    </div>
+    <div style="overflow-x:auto">
+    <table id="sessionTable">
+      <thead><tr>
+        <th data-sort="created">Date</th>
+        <th>Project</th>
+        <th>First Prompt</th>
+        <th class="text-right" data-sort="requestCount">Requests</th>
+        <th class="text-right" data-sort="inputTokens">Input</th>
+        <th class="text-right" data-sort="outputTokens">Output</th>
+        <th class="text-right" data-sort="cacheReadTokens">Cache Read</th>
+        <th class="text-right" data-sort="costUSD">Cost</th>
+      </tr></thead>
+      <tbody></tbody>
+    </table>
+    </div>
+    <p class="note">Click a session row to see per-request breakdown.</p>
+  </div>
+
+  <p class="note" style="text-align:center;margin-top:1rem">
+    Data source: ~/.claude/ (this computer only). Cost estimates use Anthropic API pricing for reference — Claude Code subscription is a flat monthly fee.
+  </p>
+</div>
+
+<script>
+// ── State ─────────────────────────────────────────────────────────────────────
+let autoRefreshInterval = null;
+let dailyData = [];
+let sessionsData = [];
+let allOverview = null;
+let allCache = null;
+let dailyView = 'tokens';
+let excludeCacheReads = false;
+let sessionSort = { key: 'created', desc: true };
+let timeRange = 'all'; // 'daily', 'weekly', 'monthly', 'all'
+
+// Chart instances
+let dailyChart, modelChart, cacheChart, hourlyChart;
+
+// ── Formatters ────────────────────────────────────────────────────────────────
+function fmtNum(n) {
+  if (n >= 1e9) return (n / 1e9).toFixed(1) + 'B';
+  if (n >= 1e6) return (n / 1e6).toFixed(1) + 'M';
+  if (n >= 1e3) return (n / 1e3).toFixed(1) + 'K';
+  return n.toLocaleString();
+}
+
+function fmtCost(n) {
+  if (n >= 1000) return '$' + (n/1000).toFixed(1) + 'K';
+  return '$' + n.toFixed(2);
+}
+
+function fmtDate(iso) {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: 'numeric' });
+}
+
+function fmtDateTime(iso) {
+  if (!iso) return '-';
+  const d = new Date(iso);
+  return d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' }) + ' ' +
+         d.toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' });
+}
+
+// ── Time Range Filtering ──────────────────────────────────────────────────────
+function getDateCutoff() {
+  const now = new Date();
+  if (timeRange === 'daily') {
+    return now.toISOString().slice(0, 10); // today only
+  } else if (timeRange === 'weekly') {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 6); // last 7 days
+    return d.toISOString().slice(0, 10);
+  } else if (timeRange === 'monthly') {
+    const d = new Date(now);
+    d.setDate(d.getDate() - 29); // last 30 days
+    return d.toISOString().slice(0, 10);
+  }
+  return null; // all time
+}
+
+function filterDailyByRange(data) {
+  const cutoff = getDateCutoff();
+  if (!cutoff) return data;
+  return data.filter(d => d.date >= cutoff);
+}
+
+function computeKPIFromDaily(filtered) {
+  let totalInput = 0, totalOutput = 0, totalCacheRead = 0, totalCacheWrite = 0;
+  let totalCost = 0, totalRequests = 0;
+  filtered.forEach(d => {
+    totalInput += d.inputTokens;
+    totalOutput += d.outputTokens;
+    totalCacheRead += d.cacheReadTokens;
+    totalCacheWrite += d.cacheWriteTokens;
+    totalCost += d.costUSD;
+    totalRequests += d.requestCount;
+  });
+  const totalTokens = totalInput + totalOutput + totalCacheRead + totalCacheWrite;
+  return { totalInput, totalOutput, totalCacheRead, totalCacheWrite, totalCost, totalRequests, totalTokens };
+}
+
+function setTimeRange(range) {
+  timeRange = range;
+  ['rangeDaily', 'rangeWeekly', 'rangeMonthly', 'rangeAll'].forEach(id => {
+    document.getElementById(id).classList.remove('active');
+  });
+  document.getElementById('range' + range.charAt(0).toUpperCase() + range.slice(1)).classList.add('active');
+  applyTimeRange();
+}
+
+function applyTimeRange() {
+  const filtered = filterDailyByRange(dailyData);
+  updateDailyChart(filtered);
+
+  if (timeRange === 'all' && allOverview) {
+    updateKPI(allOverview);
+  } else if (dailyData.length) {
+    // Recompute KPI from filtered daily data
+    const kpi = computeKPIFromDaily(filtered);
+    const firstDate = filtered.length ? filtered[0].date : null;
+    const lastDate = filtered.length ? filtered[filtered.length - 1].date : null;
+    // Estimate cost without cache: approximate from all-time ratio
+    const ratio = allOverview && allOverview.estimatedCostUSD > 0
+      ? allOverview.costWithoutCache / allOverview.estimatedCostUSD : 1;
+    const costWithoutCache = kpi.totalCost * ratio;
+
+    const totalPotential = kpi.totalInput + kpi.totalCacheRead + kpi.totalCacheWrite;
+    const hitRate = totalPotential > 0 ? (kpi.totalCacheRead / totalPotential * 100) : 0;
+
+    updateKPI({
+      totalTokens: kpi.totalTokens,
+      totalInputTokens: kpi.totalInput,
+      totalOutputTokens: kpi.totalOutput,
+      totalCacheReadTokens: kpi.totalCacheRead,
+      estimatedCostUSD: kpi.totalCost,
+      costWithoutCache: costWithoutCache,
+      savingsUSD: costWithoutCache - kpi.totalCost,
+      cacheHitRate: Math.round(hitRate * 10) / 10,
+      totalSessions: '-',
+      totalRequests: kpi.totalRequests,
+      firstDate: firstDate,
+      lastDate: lastDate,
+    });
+  }
+}
+
+// ── Data Fetching ─────────────────────────────────────────────────────────────
+async function refreshAll() {
+  try {
+    const [overview, daily, models, cache, sessions, projects, hourly] = await Promise.all([
+      fetch('/api/overview').then(r => r.json()),
+      fetch('/api/daily').then(r => r.json()),
+      fetch('/api/models').then(r => r.json()),
+      fetch('/api/cache').then(r => r.json()),
+      fetch('/api/sessions').then(r => r.json()),
+      fetch('/api/projects').then(r => r.json()),
+      fetch('/api/hourly').then(r => r.json()),
+    ]);
+
+    dailyData = daily;
+    sessionsData = sessions;
+    allOverview = overview;
+    allCache = cache;
+
+    // Apply time range filter
+    const filtered = filterDailyByRange(daily);
+
+    if (timeRange === 'all') {
+      updateKPI(overview);
+    } else {
+      applyTimeRange();
+    }
+    updateDailyChart(filtered);
+    updateModelSection(models);
+    updateCacheSection(cache);
+    updateHourlyChart(hourly);
+    updateProjectTable(projects);
+    updateSessionTable(sessions);
+    populateProjectFilter(projects);
+
+    document.getElementById('lastUpdated').textContent = 'Updated ' + new Date().toLocaleTimeString();
+  } catch (err) {
+    console.error('Failed to refresh:', err);
+    document.getElementById('lastUpdated').textContent = 'Error loading data';
+  }
+}
+
+// ── KPI Cards ─────────────────────────────────────────────────────────────────
+function updateKPI(ov) {
+  document.getElementById('kpiTokens').textContent = fmtNum(ov.totalTokens);
+  document.getElementById('kpiTokensSub').textContent =
+    `${fmtNum(ov.totalInputTokens)} in / ${fmtNum(ov.totalOutputTokens)} out / ${fmtNum(ov.totalCacheReadTokens)} cached`;
+
+  document.getElementById('kpiCost').textContent = fmtCost(ov.estimatedCostUSD);
+  document.getElementById('kpiCostSub').textContent =
+    `Would be ${fmtCost(ov.costWithoutCache)} without caching`;
+
+  document.getElementById('kpiSavings').textContent = fmtCost(ov.savingsUSD);
+  document.getElementById('kpiSavingsSub').textContent =
+    `${ov.cacheHitRate}% cache hit rate`;
+
+  document.getElementById('kpiSessions').textContent = typeof ov.totalSessions === 'number' ? ov.totalSessions.toLocaleString() : ov.totalSessions;
+  document.getElementById('kpiSessionsSub').textContent =
+    `${fmtNum(ov.totalRequests)} requests · ${ov.firstDate || '?'} to ${ov.lastDate || '?'}`;
+}
+
+// ── Daily Chart ───────────────────────────────────────────────────────────────
+function updateDailyChart(data) {
+  const ctx = document.getElementById('dailyChart').getContext('2d');
+  if (dailyChart) dailyChart.destroy();
+
+  const labels = data.map(d => d.date);
+
+  let datasets;
+  if (dailyView === 'cost') {
+    datasets = [{
+      label: 'Cost (USD)',
+      data: data.map(d => d.costUSD),
+      backgroundColor: 'rgba(124, 58, 237, 0.6)',
+      borderColor: 'rgba(124, 58, 237, 1)',
+      borderWidth: 1,
+    }];
+  } else {
+    datasets = [
+      {
+        label: 'Input Tokens',
+        data: data.map(d => d.inputTokens),
+        backgroundColor: 'rgba(59, 130, 246, 0.7)',
+        stack: 'tokens',
+      },
+      {
+        label: 'Output Tokens',
+        data: data.map(d => d.outputTokens),
+        backgroundColor: 'rgba(124, 58, 237, 0.7)',
+        stack: 'tokens',
+      },
+      {
+        label: 'Cache Write',
+        data: data.map(d => d.cacheWriteTokens),
+        backgroundColor: 'rgba(245, 158, 11, 0.7)',
+        stack: 'tokens',
+      },
+    ];
+    if (!excludeCacheReads) {
+      datasets.push({
+        label: 'Cache Read',
+        data: data.map(d => d.cacheReadTokens),
+        backgroundColor: 'rgba(16, 185, 129, 0.3)',
+        stack: 'tokens',
+      });
+    }
+  }
+
+  dailyChart = new Chart(ctx, {
+    type: 'bar',
+    data: { labels, datasets },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      interaction: { mode: 'index', intersect: false },
+      plugins: {
+        legend: { labels: { color: '#94a3b8', boxWidth: 12, padding: 15 } },
+        tooltip: {
+          callbacks: {
+            label: function(ctx) {
+              if (dailyView === 'cost') return ctx.dataset.label + ': $' + ctx.parsed.y.toFixed(2);
+              return ctx.dataset.label + ': ' + fmtNum(ctx.parsed.y);
+            }
+          }
+        }
+      },
+      scales: {
+        x: { ticks: { color: '#64748b', maxRotation: 45 }, grid: { color: 'rgba(42,42,74,0.3)' } },
+        y: {
+          ticks: {
+            color: '#64748b',
+            callback: v => dailyView === 'cost' ? '$' + v.toFixed(0) : fmtNum(v),
+          },
+          grid: { color: 'rgba(42,42,74,0.3)' },
+          stacked: dailyView === 'tokens',
+        },
+      },
+    }
+  });
+}
+
+function setDailyView(view) {
+  dailyView = view;
+  document.getElementById('dailyTokensBtn').classList.toggle('active', view === 'tokens');
+  document.getElementById('dailyCostBtn').classList.toggle('active', view === 'cost');
+  if (dailyData.length) updateDailyChart(dailyData);
+}
+
+function toggleDailyCache() {
+  excludeCacheReads = !excludeCacheReads;
+  document.getElementById('dailyNoCache').classList.toggle('active', excludeCacheReads);
+  if (dailyData.length) updateDailyChart(dailyData);
+}
+
+// ── Model Breakdown ───────────────────────────────────────────────────────────
+function updateModelSection(models) {
+  const entries = Object.entries(models).sort((a, b) => b[1].costUSD - a[1].costUSD);
+  const totalCost = entries.reduce((s, [, m]) => s + m.costUSD, 0);
+
+  // Donut chart
+  const ctx = document.getElementById('modelChart').getContext('2d');
+  if (modelChart) modelChart.destroy();
+
+  const colors = ['#7c3aed', '#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#ec4899'];
+  modelChart = new Chart(ctx, {
+    type: 'doughnut',
+    data: {
+      labels: entries.map(([, m]) => m.displayName),
+      datasets: [{
+        data: entries.map(([, m]) => m.costUSD),
+        backgroundColor: colors.slice(0, entries.length),
+        borderWidth: 0,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      cutout: '65%',
+      plugins: {
+        legend: { position: 'bottom', labels: { color: '#94a3b8', padding: 12 } },
+        tooltip: {
+          callbacks: {
+            label: ctx => ctx.label + ': $' + ctx.parsed.toFixed(2) + ' (' + (ctx.parsed / totalCost * 100).toFixed(1) + '%)',
+          }
+        }
+      }
+    }
+  });
+
+  // Table
+  const tbody = document.querySelector('#modelTable tbody');
+  tbody.innerHTML = entries.map(([id, m]) => `
+    <tr>
+      <td><span class="badge badge-purple">${m.displayName}</span></td>
+      <td class="text-right mono">${m.requestCount.toLocaleString()}</td>
+      <td class="text-right mono">${fmtCost(m.costUSD)}</td>
+    </tr>
+  `).join('');
+}
+
+// ── Cache Efficiency ──────────────────────────────────────────────────────────
+function updateCacheSection(cache) {
+  document.getElementById('cacheSavingsVal').textContent = fmtCost(cache.savingsUSD);
+  document.getElementById('cacheHitRateVal').textContent = cache.cacheHitRate + '%';
+
+  const ctx = document.getElementById('cacheChart').getContext('2d');
+  if (cacheChart) cacheChart.destroy();
+
+  cacheChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels: ['Without Cache', 'With Cache'],
+      datasets: [{
+        data: [cache.costWithoutCache, cache.costWithCache],
+        backgroundColor: ['rgba(239, 68, 68, 0.6)', 'rgba(16, 185, 129, 0.6)'],
+        borderColor: ['rgba(239, 68, 68, 1)', 'rgba(16, 185, 129, 1)'],
+        borderWidth: 1,
+        borderRadius: 6,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      indexAxis: 'y',
+      plugins: {
+        legend: { display: false },
+        tooltip: {
+          callbacks: { label: ctx => '$' + ctx.parsed.x.toFixed(2) }
+        }
+      },
+      scales: {
+        x: {
+          ticks: { color: '#64748b', callback: v => '$' + v.toFixed(0) },
+          grid: { color: 'rgba(42,42,74,0.3)' },
+        },
+        y: {
+          ticks: { color: '#94a3b8' },
+          grid: { display: false },
+        },
+      }
+    }
+  });
+}
+
+// ── Hourly Chart ──────────────────────────────────────────────────────────────
+function updateHourlyChart(hourly) {
+  const ctx = document.getElementById('hourlyChart').getContext('2d');
+  if (hourlyChart) hourlyChart.destroy();
+
+  const hours = Array.from({ length: 24 }, (_, i) => i);
+  const labels = hours.map(h => {
+    const ampm = h >= 12 ? 'PM' : 'AM';
+    const h12 = h % 12 || 12;
+    return h12 + ampm;
+  });
+
+  const counts = hours.map(h => hourly.hourCounts[String(h)] || 0);
+  const maxCount = Math.max(...counts, 1);
+
+  hourlyChart = new Chart(ctx, {
+    type: 'bar',
+    data: {
+      labels,
+      datasets: [{
+        label: 'Requests',
+        data: counts,
+        backgroundColor: counts.map(c => {
+          const intensity = c / maxCount;
+          return `rgba(124, 58, 237, ${0.2 + intensity * 0.6})`;
+        }),
+        borderRadius: 4,
+      }]
+    },
+    options: {
+      responsive: true,
+      maintainAspectRatio: false,
+      plugins: {
+        legend: { display: false },
+      },
+      scales: {
+        x: { ticks: { color: '#64748b' }, grid: { display: false } },
+        y: { ticks: { color: '#64748b' }, grid: { color: 'rgba(42,42,74,0.3)' } },
+      }
+    }
+  });
+}
+
+// ── Project Table ─────────────────────────────────────────────────────────────
+function updateProjectTable(projects) {
+  const tbody = document.querySelector('#projectTable tbody');
+  tbody.innerHTML = projects.map(p => `
+    <tr>
+      <td>${p.displayName}</td>
+      <td class="text-right mono">${p.sessionCount}</td>
+      <td class="text-right mono">${p.requestCount.toLocaleString()}</td>
+      <td class="text-right mono">${fmtNum(p.inputTokens)}</td>
+      <td class="text-right mono">${fmtNum(p.outputTokens)}</td>
+      <td class="text-right mono">${fmtNum(p.cacheReadTokens)}</td>
+      <td class="text-right mono text-purple">${fmtCost(p.costUSD)}</td>
+    </tr>
+  `).join('');
+}
+
+// ── Session Table ─────────────────────────────────────────────────────────────
+function populateProjectFilter(projects) {
+  const sel = document.getElementById('sessionProjectFilter');
+  const current = sel.value;
+  sel.innerHTML = '<option value="">All Projects</option>' +
+    projects.map(p => `<option value="${p.projectDirName}">${p.displayName}</option>`).join('');
+  sel.value = current;
+}
+
+function updateSessionTable(sessions) {
+  sessionsData = sessions;
+  renderSessionRows(sessions);
+}
+
+function renderSessionRows(sessions) {
+  // Apply filters
+  const projFilter = document.getElementById('sessionProjectFilter').value;
+  const searchTerm = document.getElementById('sessionSearch').value.toLowerCase();
+
+  let filtered = sessions;
+  if (projFilter) filtered = filtered.filter(s => s.projectDirName === projFilter);
+  if (searchTerm) filtered = filtered.filter(s => (s.firstPrompt || '').toLowerCase().includes(searchTerm));
+
+  // Sort
+  filtered.sort((a, b) => {
+    let av = a[sessionSort.key] || '';
+    let bv = b[sessionSort.key] || '';
+    if (typeof av === 'number') return sessionSort.desc ? bv - av : av - bv;
+    return sessionSort.desc ? String(bv).localeCompare(String(av)) : String(av).localeCompare(String(bv));
+  });
+
+  const tbody = document.querySelector('#sessionTable tbody');
+  tbody.innerHTML = filtered.map(s => `
+    <tr class="session-row" onclick="toggleSessionDetail(this, '${s.sessionId}')">
+      <td class="mono">${fmtDateTime(s.created)}</td>
+      <td><span class="badge badge-blue">${s.projectName}</span></td>
+      <td class="prompt-text" title="${(s.firstPrompt || '').replace(/"/g, '&quot;')}">${s.firstPrompt || '-'}</td>
+      <td class="text-right mono">${s.requestCount}</td>
+      <td class="text-right mono">${fmtNum(s.inputTokens)}</td>
+      <td class="text-right mono">${fmtNum(s.outputTokens)}</td>
+      <td class="text-right mono">${fmtNum(s.cacheReadTokens)}</td>
+      <td class="text-right mono text-purple">${fmtCost(s.costUSD)}</td>
+    </tr>
+    <tr class="session-detail" id="detail-${s.sessionId}">
+      <td colspan="8"><div class="loading">Loading...</div></td>
+    </tr>
+  `).join('');
+
+  // Update sort indicators
+  document.querySelectorAll('#sessionTable th').forEach(th => {
+    th.classList.remove('sorted-asc', 'sorted-desc');
+    if (th.dataset.sort === sessionSort.key) {
+      th.classList.add(sessionSort.desc ? 'sorted-desc' : 'sorted-asc');
+    }
+  });
+}
+
+function filterSessions() {
+  renderSessionRows(sessionsData);
+}
+
+// Session table sort
+document.querySelector('#sessionTable thead').addEventListener('click', e => {
+  const th = e.target.closest('th');
+  if (!th || !th.dataset.sort) return;
+  if (sessionSort.key === th.dataset.sort) {
+    sessionSort.desc = !sessionSort.desc;
+  } else {
+    sessionSort.key = th.dataset.sort;
+    sessionSort.desc = true;
+  }
+  renderSessionRows(sessionsData);
+});
+
+async function toggleSessionDetail(row, sessionId) {
+  const detailRow = document.getElementById('detail-' + sessionId);
+  if (detailRow.classList.contains('open')) {
+    detailRow.classList.remove('open');
+    return;
+  }
+
+  detailRow.classList.add('open');
+
+  try {
+    const data = await fetch('/api/session/' + sessionId).then(r => r.json());
+    if (data.error) {
+      detailRow.querySelector('td').innerHTML = '<span class="text-muted">Session data not found</span>';
+      return;
+    }
+
+    const reqs = data.requests || [];
+    let html = '<table><thead><tr>' +
+      '<th>Time</th><th>Model</th>' +
+      '<th class="text-right">Input</th><th class="text-right">Output</th>' +
+      '<th class="text-right">Cache Read</th><th class="text-right">Cache Write</th>' +
+      '<th class="text-right">Cost</th></tr></thead><tbody>';
+
+    reqs.forEach(r => {
+      html += `<tr>
+        <td class="mono">${fmtDateTime(r.timestamp)}</td>
+        <td><span class="badge badge-purple">${r.modelDisplay}</span></td>
+        <td class="text-right mono">${fmtNum(r.inputTokens)}</td>
+        <td class="text-right mono">${fmtNum(r.outputTokens)}</td>
+        <td class="text-right mono">${fmtNum(r.cacheReadTokens)}</td>
+        <td class="text-right mono">${fmtNum(r.cacheWriteTokens)}</td>
+        <td class="text-right mono text-purple">$${r.costUSD.toFixed(4)}</td>
+      </tr>`;
+    });
+
+    html += '</tbody></table>';
+    detailRow.querySelector('td').innerHTML = html;
+  } catch (err) {
+    detailRow.querySelector('td').innerHTML = '<span class="text-muted">Failed to load detail</span>';
+  }
+}
+
+// ── Auto-refresh ──────────────────────────────────────────────────────────────
+function toggleAutoRefresh() {
+  const btn = document.getElementById('autoRefreshBtn');
+  if (autoRefreshInterval) {
+    clearInterval(autoRefreshInterval);
+    autoRefreshInterval = null;
+    btn.textContent = 'Auto-refresh: OFF';
+    btn.classList.remove('active');
+  } else {
+    autoRefreshInterval = setInterval(refreshAll, 30000);
+    btn.textContent = 'Auto-refresh: ON';
+    btn.classList.add('active');
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────────
+refreshAll();
+</script>
+</body>
+</html>
