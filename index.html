@@ -516,18 +516,23 @@ function fmtDateTime(iso) {
 }
 
 // ── Time Range Filtering ──────────────────────────────────────────────────────
+function localDateStr(d) {
+  // Format as YYYY-MM-DD in local timezone (not UTC)
+  return d.getFullYear() + '-' + String(d.getMonth()+1).padStart(2,'0') + '-' + String(d.getDate()).padStart(2,'0');
+}
+
 function getDateCutoff() {
   const now = new Date();
   if (timeRange === 'daily') {
-    return now.toISOString().slice(0, 10); // today only
+    return localDateStr(now); // today only
   } else if (timeRange === 'weekly') {
     const d = new Date(now);
     d.setDate(d.getDate() - 6); // last 7 days
-    return d.toISOString().slice(0, 10);
+    return localDateStr(d);
   } else if (timeRange === 'monthly') {
     const d = new Date(now);
     d.setDate(d.getDate() - 29); // last 30 days
-    return d.toISOString().slice(0, 10);
+    return localDateStr(d);
   }
   return null; // all time
 }

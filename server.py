@@ -451,9 +451,15 @@ class DataCollector:
                     sess_cache_write += cw
                     sess_cost += cost
 
-                    # Daily
+                    # Daily (convert UTC timestamp to local date)
                     ts = req["timestamp"]
-                    date_str = ts[:10] if ts else ""
+                    date_str = ""
+                    if ts:
+                        try:
+                            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
+                            date_str = dt.astimezone().strftime("%Y-%m-%d")
+                        except Exception:
+                            date_str = ts[:10]
                     if date_str:
                         d = daily[date_str]
                         d["inputTokens"] += inp
