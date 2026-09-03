@@ -70,16 +70,33 @@ Cost estimates use Anthropic's published API pricing for reference. Claude Code 
 
 ### Current Models (2026)
 
+**Opus Tier (Most Capable)**
+
 | Model | Input | Output | Cache Read | Cache Write (5min) |
 |-------|-------|--------|------------|-------------------|
 | **Claude Opus 5** | $5.00/M | $25.00/M | $0.50/M | $6.25/M |
 | Claude Opus 4.8 | $5.00/M | $25.00/M | $0.50/M | $6.25/M |
 | Claude Opus 4.6/4.5 | $5.00/M | $25.00/M | $0.50/M | $6.25/M |
 | Claude Opus 4.1/4 | $15.00/M | $75.00/M | $1.50/M | $18.75/M |
+
+**Sonnet Tier (Balanced)**
+
+| Model | Input | Output | Cache Read | Cache Write (5min) |
+|-------|-------|--------|------------|-------------------|
 | **Claude Sonnet 5** | $2.00/M | $10.00/M | $0.20/M | $2.50/M |
 | Claude Sonnet 4.6/4.5/4 | $3.00/M | $15.00/M | $0.30/M | $3.75/M |
+
+**Fable Tier (Experimental)**
+
+| Model | Input | Output | Cache Read | Cache Write (5min) |
+|-------|-------|--------|------------|-------------------|
 | **Claude Fable 5** | $10.00/M | $50.00/M | $1.00/M | $12.50/M |
-| Claude Haiku 4.5 | $1.00/M | $5.00/M | $0.10/M | $1.25/M |
+
+**Haiku Tier (Speed/Cost)**
+
+| Model | Input | Output | Cache Read | Cache Write (5min) |
+|-------|-------|--------|------------|-------------------|
+| **Claude Haiku 4.5** | $1.00/M | $5.00/M | $0.10/M | $1.25/M |
 | Claude Haiku 3.5 | $0.80/M | $4.00/M | $0.08/M | $1.00/M |
 
 **Legend**: M = per 1 million tokens. Bold = latest/newest model in each tier.
