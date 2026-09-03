@@ -4,7 +4,7 @@ A local web dashboard for tracking your [Claude Code](https://docs.anthropic.com
 
 ![Claude Token Tracker Dashboard](screenshot.png)
 
-*Dashboard screenshot updated September 2, 2026 — now showing accurate token tracking with recursive subagent scanning and resumed session deduplication.*
+*Dashboard showing accurate token tracking with recursive subagent scanning and resumed session deduplication fixes (September 2, 2026).*
 
 ## Latest Updates (September 2026)
 
