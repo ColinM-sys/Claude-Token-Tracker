@@ -4,6 +4,15 @@ A local web dashboard for tracking your [Claude Code](https://docs.anthropic.com
 
 ![Claude Token Tracker Dashboard](screenshot.png)
 
+## Latest Updates (September 2026)
+
+### Bug Fixes (Sept 2, 2026)
+- **Fixed recursive file scanning**: Changed from `glob("*.jsonl")` to `rglob("*.jsonl")` to catch nested subagent transcripts in `<session-id>/subagents/workflows/` directories (was missing 82% of actual token usage)
+- **Fixed resumed session double-counting**: Implemented global requestId deduplication — when sessions are resumed with `--resume`, prior transcripts copy into new files with duplicate requestIds. Now takes max(input, output, cache_read, cache_write) across all copies instead of per-file deduplication
+- **Added Opus 5, Sonnet 5, Fable 5 pricing**: Updated MODEL_PRICING for latest Claude models (Opus 5: $5/$25 input/output, Sonnet 5: $2/$10, Fable 5: $10/$50)
+
+**Impact**: Token counter now accurately tracks 100% of usage (was only showing ~83% before due to missing subagent transcripts and resumed session bugs).
+
 ## Features
 
 - **KPI Cards** — Total tokens, estimated API cost, cache savings, and session count at a glance
@@ -20,12 +29,18 @@ A local web dashboard for tracking your [Claude Code](https://docs.anthropic.com
 
 Claude Code stores session data as JSONL files in `~/.claude/projects/`. The tracker:
 
-1. Scans all session files in `~/.claude/projects/`
+1. **Recursively scans** all session files in `~/.claude/projects/` (including subagent transcripts in `<session-id>/subagents/workflows/` directories)
 2. Parses each JSONL file to extract token usage per request (input, output, cache read, cache write)
-3. Computes estimated API costs using current Anthropic pricing
-4. Serves a single-page dashboard on `localhost:8050` with interactive Chart.js visualizations
+3. **Deduplicates** requestIds globally — resumed sessions create duplicate requestIds across transcript copies, tracker takes max usage to avoid double-counting
+4. Computes estimated API costs using current Anthropic pricing (Opus 5, Sonnet 5, Fable 5, Haiku 4.5 tiers)
+5. Serves a single-page dashboard on `localhost:8050` with interactive Chart.js visualizations
 
 All data stays local — nothing is sent anywhere.
+
+### Data Sources Tracked
+- **Main session transcripts**: `~/.claude/projects/<project>/sessions/<session-id>.jsonl`
+- **Subagent transcripts**: `~/.claude/projects/<project>/sessions/<session-id>/subagents/workflows/wf_*/agent-*.jsonl` (now included)
+- **Resumed sessions**: Duplicates are merged using global requestId deduplication
 
 ## Installation
 

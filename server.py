@@ -31,13 +31,18 @@ SCRIPT_DIR = Path(__file__).parent
 # (input, output, cache_read, cache_5m_write, cache_1h_write)
 
 MODEL_PRICING = {
+    "claude-opus-5":     (5.00, 25.00, 0.50, 6.25, 10.00),
+    "claude-opus-4-8":   (5.00, 25.00, 0.50, 6.25, 10.00),
+    "claude-opus-4-7":   (5.00, 25.00, 0.50, 6.25, 10.00),
     "claude-opus-4-6":   (5.00, 25.00, 0.50, 6.25, 10.00),
     "claude-opus-4-5":   (5.00, 25.00, 0.50, 6.25, 10.00),
     "claude-opus-4-1":   (15.00, 75.00, 1.50, 18.75, 30.00),
     "claude-opus-4":     (15.00, 75.00, 1.50, 18.75, 30.00),
+    "claude-sonnet-5":   (2.00, 10.00, 0.20, 2.50, 4.00),
     "claude-sonnet-4-6": (3.00, 15.00, 0.30, 3.75, 6.00),
     "claude-sonnet-4-5": (3.00, 15.00, 0.30, 3.75, 6.00),
     "claude-sonnet-4":   (3.00, 15.00, 0.30, 3.75, 6.00),
+    "claude-fable-5":    (10.00, 50.00, 1.00, 12.50, 20.00),
     "claude-haiku-4-5":  (1.00, 5.00, 0.10, 1.25, 2.00),
     "claude-haiku-3-5":  (0.80, 4.00, 0.08, 1.00, 1.60),
     "claude-haiku-3":    (0.25, 1.25, 0.03, 0.30, 0.50),
@@ -221,8 +226,8 @@ class DataCollector:
                 except Exception:
                     pass
 
-            # Scan for JSONL files
-            jsonl_files = list(project_dir.glob("*.jsonl"))
+            # Scan for JSONL files (recursive, includes subagents)
+            jsonl_files = list(project_dir.rglob("*.jsonl"))
             all_projects.append({
                 "dirName": project_name,
                 "originalPath": original_path,
@@ -368,6 +373,9 @@ class DataCollector:
         }
 
     def _aggregate(self, all_projects, all_sessions_meta):
+        # Global requestId tracking for deduplication (take max usage across copies)
+        global_rid_usage = {}  # rid -> {input, output, cache_read, cache_write, model, timestamp}
+
         # Accumulators
         total_input = 0
         total_output = 0
@@ -427,14 +435,42 @@ class DataCollector:
                 sess_last_ts = None
 
                 for req in parsed["requests"]:
+                    rid = req.get("requestId")
                     model = req["model"]
-                    cost = _compute_cost_from_req(req)
-                    no_cache_cost = _compute_no_cache_cost_from_req(req)
                     inp = req["input_tokens"]
                     out = req["output_tokens"]
                     cr = req["cache_read_input_tokens"]
                     cw = req["cache_creation_input_tokens"]
                     ws = req.get("web_searches", 0)
+
+                    # Global dedupe: track max usage per requestId
+                    if rid not in global_rid_usage:
+                        global_rid_usage[rid] = {
+                            "input": inp, "output": out, "cache_read": cr, "cache_write": cw,
+                            "model": model, "timestamp": req.get("timestamp", ""), "ws": ws
+                        }
+                    else:
+                        # Take max of each field
+                        prev = global_rid_usage[rid]
+                        global_rid_usage[rid] = {
+                            "input": max(prev["input"], inp),
+                            "output": max(prev["output"], out),
+                            "cache_read": max(prev["cache_read"], cr),
+                            "cache_write": max(prev["cache_write"], cw),
+                            "model": model,
+                            "timestamp": min(prev["timestamp"], req.get("timestamp", "")) if prev["timestamp"] and req.get("timestamp") else (prev["timestamp"] or req.get("timestamp", "")),
+                            "ws": max(prev["ws"], ws)
+                        }
+
+                    # Use the deduplicated values
+                    dedup_vals = global_rid_usage[rid]
+                    inp = dedup_vals["input"]
+                    out = dedup_vals["output"]
+                    cr = dedup_vals["cache_read"]
+                    cw = dedup_vals["cache_write"]
+                    ws = dedup_vals["ws"]
+                    cost = _compute_cost_from_req({"input_tokens": inp, "output_tokens": out, "cache_read_input_tokens": cr, "cache_creation_input_tokens": cw, "model": model, "web_searches": ws})
+                    no_cache_cost = _compute_no_cache_cost_from_req({"input_tokens": inp, "output_tokens": out, "cache_read_input_tokens": cr, "cache_creation_input_tokens": cw, "model": model})
 
                     total_input += inp
                     total_output += out
