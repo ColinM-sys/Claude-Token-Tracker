@@ -75,3 +75,10 @@ Cost estimates use Anthropic's published API pricing for reference. Claude Code 
 ## License
 
 MIT
+
+
+---
+
+## Author
+
+Built by **Colin McDonough** — [LinkedIn](https://www.linkedin.com/in/colinmcdonoughmarketing) · [GitHub](https://github.com/ColinM-sys)
