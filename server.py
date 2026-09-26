@@ -263,7 +263,12 @@ class DataCollector:
     def _parse_session_file(self, filepath):
         """Parse a session JSONL, returning per-request usage data."""
         requests = []
-        seen_request_ids = set()
+        # requestId -> index in `requests`. Claude Code writes ONE API reply as several
+        # assistant entries (one per content block) sharing a requestId; since ~2026-09-24
+        # the first carries a partial output_tokens and a later one the final count. Keep
+        # the largest value of every field instead of the first entry, or output (the
+        # priciest tokens) is undercounted 3-5x.
+        seen_request_ids = {}
         first_user_prompt = ""
         git_branch = ""
         session_id = ""
@@ -303,9 +308,8 @@ class DataCollector:
                         continue
 
                     req_id = entry.get("requestId", "")
-                    if not req_id or req_id in seen_request_ids:
+                    if not req_id:
                         continue
-                    seen_request_ids.add(req_id)
 
                     msg = entry.get("message", {})
                     model = msg.get("model", "")
@@ -328,7 +332,7 @@ class DataCollector:
                     if isinstance(stu, dict):
                         ws = stu.get("web_search_requests", 0)
 
-                    requests.append({
+                    row = {
                         "requestId": req_id,
                         "model": model,
                         "timestamp": timestamp,
@@ -339,7 +343,18 @@ class DataCollector:
                         "cache_5m_tokens": cache_5m,
                         "cache_1h_tokens": cache_1h,
                         "web_searches": ws,
-                    })
+                    }
+                    at = seen_request_ids.get(req_id)
+                    if at is None:
+                        seen_request_ids[req_id] = len(requests)
+                        requests.append(row)
+                    else:
+                        prev = requests[at]
+                        for k, v in row.items():
+                            if isinstance(v, (int, float)) and not isinstance(v, bool):
+                                prev[k] = max(prev.get(k, 0) or 0, v)
+                        if not prev.get("timestamp") and timestamp:
+                            prev["timestamp"] = timestamp
         except Exception:
             pass
 
