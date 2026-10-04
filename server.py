@@ -16,6 +16,7 @@ from pathlib import Path
 from http.server import HTTPServer, SimpleHTTPRequestHandler
 from urllib.parse import urlparse, parse_qs
 from collections import defaultdict
+from functools import lru_cache
 from datetime import datetime, timezone
 
 # ── Configuration ──────────────────────────────────────────────────────────────
@@ -25,7 +26,13 @@ STATS_CACHE = CLAUDE_DIR / "stats-cache.json"
 PROJECTS_DIR = CLAUDE_DIR / "projects"
 PORT = 8050
 CACHE_TTL_SECONDS = 30
-SCRIPT_DIR = Path(__file__).parent
+SCRIPT_DIR = Path(__file__).resolve().parent
+# Per-file parse results, so a start or refresh only re-reads transcripts that changed.
+# Holds per file: size, mtime, session id, branch, and per request its id, model, time and
+# token counts. Never message text.
+CACHE_FILE = SCRIPT_DIR / "token_cache.json"
+CACHE_FORMAT = 1           # bump when the parse rules change: an older cache is then ignored
+CACHE_SAVE_SECONDS = 300   # after startup, rewrite the cache at most this often
 
 # ── Anthropic API Pricing (per million tokens) ────────────────────────────────
 # (input, output, cache_read, cache_5m_write, cache_1h_write)
@@ -50,6 +57,7 @@ MODEL_PRICING = {
 WEB_SEARCH_COST = 0.01  # $0.01 per search
 
 
+@lru_cache(maxsize=None)
 def get_pricing(model_id):
     """Map a model ID like 'claude-opus-4-5-20251101' to its pricing tuple."""
     if not model_id or model_id == "<synthetic>":
@@ -168,16 +176,159 @@ def model_display_name(model_id):
     return model_id
 
 
+# ── Transcript parsing ─────────────────────────────────────────────────────────
+# One request row: [requestId, model, timestamp_ms, input, output, cache_read,
+#                   cache_write_total, cache_write_5m, cache_write_1h, web_searches]
+R_RID, R_MODEL, R_TS, R_IN, R_OUT, R_CR, R_CW, R_C5, R_C1, R_WS = range(10)
+
+_RID_KEY = b'"requestId"'
+_USER_KEYS = (b'"type":"user"', b'"type": "user"')
+
+
+def _num(v):
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else 0
+
+
+def _ts_to_ms(ts):
+    """ISO timestamp -> epoch milliseconds (0 when missing or unreadable)."""
+    if not ts or not isinstance(ts, str):
+        return 0
+    try:
+        return int(round(datetime.fromisoformat(ts.replace("Z", "+00:00")).timestamp() * 1000))
+    except (ValueError, OverflowError, OSError):
+        return 0
+
+
+def _ms_to_iso(ms):
+    """Epoch milliseconds -> '2026-10-04T12:34:56.789Z' (the format Claude Code writes)."""
+    if not ms:
+        return ""
+    s, rem = divmod(ms, 1000)
+    return datetime.fromtimestamp(s, timezone.utc).strftime("%Y-%m-%dT%H:%M:%S") + ".%03dZ" % rem
+
+
+def _row_to_req(r):
+    return {
+        "model": r[R_MODEL], "input_tokens": r[R_IN], "output_tokens": r[R_OUT],
+        "cache_read_input_tokens": r[R_CR], "cache_creation_input_tokens": r[R_CW],
+        "cache_5m_tokens": r[R_C5], "cache_1h_tokens": r[R_C1], "web_searches": r[R_WS],
+    }
+
+
+def _first_prompt_of(entry):
+    """The first typed text block of a user entry (200 chars), or ''."""
+    msg = entry.get("message")
+    content = msg.get("content") if isinstance(msg, dict) else None
+    if isinstance(content, list):
+        for c in content:
+            if isinstance(c, dict) and c.get("type") == "text":
+                text = c.get("text", "")
+                if text and isinstance(text, str) and not text.startswith("<ide_"):
+                    return text[:200]
+    return ""
+
+
+def parse_transcript(filepath, limit=None):
+    """Read a session .jsonl (its first `limit` bytes) and return its per-request usage.
+
+    Claude Code writes ONE API reply as several assistant entries (one per content block)
+    sharing a requestId; since ~2026-09-24 the first carries a partial output_tokens and a
+    later one the final count. Keep the largest value of every field per requestId and the
+    first timestamp, or output (the priciest tokens) is undercounted 3-5x.
+
+    Only lines that can matter are JSON-decoded: entries with a "requestId" key, and user
+    entries until the first prompt is found. The prompt text is returned under "_prompt"
+    for memory only; the disk cache keeps its byte offset ("promptAt"), never the text.
+    """
+    rows = []
+    at = {}
+    sid = ""
+    branch = ""
+    prompt = ""
+    prompt_at = -1
+    pos = 0
+    with open(filepath, "rb") as f:
+        for raw in f:
+            start = pos
+            pos += len(raw)
+            if limit is not None:
+                if start >= limit:
+                    break
+                if pos > limit:
+                    raw = raw[:limit - start]
+            if _RID_KEY not in raw and (prompt_at >= 0 or not (_USER_KEYS[0] in raw or _USER_KEYS[1] in raw)):
+                continue
+            try:
+                entry = json.loads(raw)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if not sid:
+                sid = entry.get("sessionId") or ""
+            if not branch:
+                branch = entry.get("gitBranch") or ""
+            etype = entry.get("type")
+            if etype == "user":
+                if prompt_at < 0:
+                    text = _first_prompt_of(entry)
+                    if text:
+                        prompt, prompt_at = text, start
+                continue
+            if etype != "assistant":
+                continue
+            rid = entry.get("requestId") or ""
+            msg = entry.get("message")
+            if not rid or not isinstance(msg, dict):
+                continue
+            model = msg.get("model") or ""
+            if model == "<synthetic>":
+                continue
+            usage = msg.get("usage")
+            if not usage or not isinstance(usage, dict):
+                continue
+            cc = usage.get("cache_creation")
+            if not isinstance(cc, dict):
+                cc = {}
+            stu = usage.get("server_tool_use")
+            row = [
+                rid, model, _ts_to_ms(entry.get("timestamp")),
+                _num(usage.get("input_tokens", 0)),
+                _num(usage.get("output_tokens", 0)),
+                _num(usage.get("cache_read_input_tokens", 0)),
+                _num(usage.get("cache_creation_input_tokens", 0)),
+                _num(cc.get("ephemeral_5m_input_tokens", 0)),
+                _num(cc.get("ephemeral_1h_input_tokens", 0)),
+                _num(stu.get("web_search_requests", 0)) if isinstance(stu, dict) else 0,
+            ]
+            i = at.get(rid)
+            if i is None:
+                at[rid] = len(rows)
+                rows.append(row)
+            else:
+                prev = rows[i]
+                if not prev[R_TS] and row[R_TS]:
+                    prev[R_TS] = row[R_TS]
+                for k in range(R_IN, R_WS + 1):
+                    if row[k] > prev[k]:
+                        prev[k] = row[k]
+    return {"sid": sid, "branch": branch, "promptAt": prompt_at, "reqs": rows, "_prompt": prompt}
+
+
 # ── Data Collector ─────────────────────────────────────────────────────────────
 
 class DataCollector:
-    def __init__(self):
+    def __init__(self, cache_file=CACHE_FILE):
         self._cache = None
         self._cache_time = 0
         self._lock = threading.Lock()
-        self._file_mtimes = {}
-        self._parsed_files = {}
-        self._session_index_cache = {}
+        self._cache_file = Path(cache_file) if cache_file else None
+        self._files = {}     # path -> {"size", "mtime", "sid", "branch", "promptAt", "reqs"}
+        self._prompts = {}   # path -> first prompt text (memory only, never written to disk)
+        self._dirty = False
+        self._last_save = 0.0
+        self.last_refresh = {"files": 0, "parsed": 0, "seconds": 0.0}
+        self._load_cache()
 
     def get_data(self, force=False):
         with self._lock:
@@ -185,9 +336,16 @@ class DataCollector:
             if not force and self._cache and (now - self._cache_time) < CACHE_TTL_SECONDS:
                 return self._cache
             data = self._refresh()
+            if self._dirty and (force or time.time() - self._last_save >= CACHE_SAVE_SECONDS):
+                self._save_cache()
             self._cache = data
             self._cache_time = now
             return data
+
+    def save_cache(self):
+        with self._lock:
+            if self._dirty:
+                self._save_cache()
 
     def get_session_detail(self, session_id):
         """Get per-request detail for a single session."""
@@ -199,7 +357,60 @@ class DataCollector:
                 return self._parse_session_detail(jsonl_path)
         return None
 
+    # ── Disk cache ──
+
+    def _load_cache(self):
+        if not self._cache_file or not self._cache_file.exists():
+            return
+        try:
+            with open(self._cache_file, "r", encoding="utf-8") as f:
+                doc = json.load(f)
+            if doc.get("format") != CACHE_FORMAT:
+                return
+            models = doc["models"]
+            files = {}
+            for path, e in doc["files"].items():
+                files[path] = {
+                    "size": e["size"], "mtime": e["mtime"], "sid": e["sid"], "branch": e["branch"],
+                    "promptAt": e["promptAt"],
+                    "reqs": [[r[0], models[r[1]]] + r[2:] for r in e["reqs"]],
+                }
+            self._files = files
+        except Exception as exc:  # unreadable or old cache: start from scratch
+            print(f"Ignoring {self._cache_file.name}: {exc}")
+            self._files = {}
+
+    def _save_cache(self):
+        if not self._cache_file:
+            return
+        models = {}
+        files = {}
+        for path, e in self._files.items():
+            files[path] = {
+                "size": e["size"], "mtime": e["mtime"], "sid": e["sid"], "branch": e["branch"],
+                "promptAt": e["promptAt"],
+                "reqs": [[r[R_RID], models.setdefault(r[R_MODEL], len(models))] + r[R_TS:] for r in e["reqs"]],
+            }
+        doc = {"format": CACHE_FORMAT, "models": list(models), "files": files}
+        tmp = self._cache_file.with_name(self._cache_file.name + ".tmp")
+        try:
+            text = json.dumps(doc, separators=(",", ":"))  # dumps (C encoder) is ~10x faster than dump
+            with open(tmp, "w", encoding="utf-8") as f:
+                f.write(text)
+            os.replace(tmp, self._cache_file)
+            self._dirty = False
+            self._last_save = time.time()
+        except OSError as exc:  # e.g. disk full: keep serving from memory
+            print(f"Could not write {self._cache_file.name}: {exc}")
+            try:
+                tmp.unlink()
+            except OSError:
+                pass
+
+    # ── Refresh ──
+
     def _refresh(self):
+        t0 = time.time()
         all_projects = []
         all_sessions_meta = {}
 
@@ -207,7 +418,7 @@ class DataCollector:
             return self._empty_data()
 
         # Discover projects and load session indexes
-        for project_dir in PROJECTS_DIR.iterdir():
+        for project_dir in sorted(PROJECTS_DIR.iterdir()):
             if not project_dir.is_dir():
                 continue
             project_name = project_dir.name
@@ -226,8 +437,9 @@ class DataCollector:
                 except Exception:
                     pass
 
-            # Scan for JSONL files (recursive, includes subagents)
-            jsonl_files = list(project_dir.rglob("*.jsonl"))
+            # Every .jsonl, recursively (subagent transcripts too), in every project. Benchmark
+            # projects (C--ccbench-*) are real usage and are counted like any other project.
+            jsonl_files = sorted(str(p) for p in project_dir.rglob("*.jsonl"))
             all_projects.append({
                 "dirName": project_name,
                 "originalPath": original_path,
@@ -237,159 +449,115 @@ class DataCollector:
             })
             all_sessions_meta.update(sessions_meta)
 
-        # Parse JSONL files (incremental)
+        # Parse only new or changed files (by size and mtime); the rest come from the cache.
+        seen = set()
+        parsed = 0
         for proj in all_projects:
             for fp in proj["jsonlFiles"]:
                 try:
-                    mtime = fp.stat().st_mtime
+                    st = os.stat(fp)
                 except OSError:
                     continue
-                if fp not in self._file_mtimes or self._file_mtimes[fp] != mtime:
-                    self._parsed_files[fp] = self._parse_session_file(fp)
-                    self._file_mtimes[fp] = mtime
+                seen.add(fp)
+                e = self._files.get(fp)
+                if e is not None and e["size"] == st.st_size and e["mtime"] == st.st_mtime_ns:
+                    continue
+                try:
+                    e = parse_transcript(fp, limit=st.st_size)
+                except OSError:
+                    continue  # unreadable right now: keep any earlier result
+                prompt = e.pop("_prompt")
+                e["size"] = st.st_size
+                e["mtime"] = st.st_mtime_ns
+                self._files[fp] = e
+                if prompt:
+                    self._prompts[fp] = prompt
+                else:
+                    self._prompts.pop(fp, None)
+                self._dirty = True
+                parsed += 1
 
-        # Clean up deleted files
-        existing = set()
-        for proj in all_projects:
-            existing.update(proj["jsonlFiles"])
-        for fp in list(self._file_mtimes.keys()):
-            if fp not in existing:
-                del self._file_mtimes[fp]
-                self._parsed_files.pop(fp, None)
+        # Forget deleted files
+        for fp in list(self._files):
+            if fp not in seen:
+                del self._files[fp]
+                self._prompts.pop(fp, None)
+                self._dirty = True
 
-        # Aggregate
-        return self._aggregate(all_projects, all_sessions_meta)
+        data = self._aggregate(all_projects, all_sessions_meta)
+        self.last_refresh = {"files": len(seen), "parsed": parsed, "seconds": round(time.time() - t0, 2)}
+        return data
 
-    def _parse_session_file(self, filepath):
-        """Parse a session JSONL, returning per-request usage data."""
-        requests = []
-        # requestId -> index in `requests`. Claude Code writes ONE API reply as several
-        # assistant entries (one per content block) sharing a requestId; since ~2026-09-24
-        # the first carries a partial output_tokens and a later one the final count. Keep
-        # the largest value of every field instead of the first entry, or output (the
-        # priciest tokens) is undercounted 3-5x.
-        seen_request_ids = {}
-        first_user_prompt = ""
-        git_branch = ""
-        session_id = ""
-
-        try:
-            with open(filepath, "r", encoding="utf-8") as f:
-                for line in f:
-                    line = line.strip()
-                    if not line:
-                        continue
-                    try:
-                        entry = json.loads(line)
-                    except (json.JSONDecodeError, ValueError):
-                        continue
-
-                    entry_type = entry.get("type", "")
-
-                    # Extract session metadata from first entries
-                    if not session_id:
-                        session_id = entry.get("sessionId", "")
-                    if not git_branch:
-                        git_branch = entry.get("gitBranch", "")
-
-                    # Get first user prompt
-                    if entry_type == "user" and not first_user_prompt:
-                        msg = entry.get("message", {})
-                        content = msg.get("content", [])
-                        if isinstance(content, list):
-                            for c in content:
-                                if isinstance(c, dict) and c.get("type") == "text":
-                                    text = c.get("text", "")
-                                    if text and not text.startswith("<ide_"):
-                                        first_user_prompt = text[:200]
-                                        break
-
-                    if entry_type != "assistant":
-                        continue
-
-                    req_id = entry.get("requestId", "")
-                    if not req_id:
-                        continue
-
-                    msg = entry.get("message", {})
-                    model = msg.get("model", "")
-                    if model == "<synthetic>":
-                        continue
-
-                    usage = msg.get("usage", {})
-                    if not usage:
-                        continue
-
-                    timestamp = entry.get("timestamp", "")
-
-                    # Extract only the numbers we need (not the whole usage dict)
-                    cache_creation = usage.get("cache_creation", {})
-                    cache_5m = cache_creation.get("ephemeral_5m_input_tokens", 0)
-                    cache_1h = cache_creation.get("ephemeral_1h_input_tokens", 0)
-                    cw_total = usage.get("cache_creation_input_tokens", 0)
-                    ws = 0
-                    stu = usage.get("server_tool_use")
-                    if isinstance(stu, dict):
-                        ws = stu.get("web_search_requests", 0)
-
-                    row = {
-                        "requestId": req_id,
-                        "model": model,
-                        "timestamp": timestamp,
-                        "input_tokens": usage.get("input_tokens", 0),
-                        "output_tokens": usage.get("output_tokens", 0),
-                        "cache_read_input_tokens": usage.get("cache_read_input_tokens", 0),
-                        "cache_creation_input_tokens": cw_total,
-                        "cache_5m_tokens": cache_5m,
-                        "cache_1h_tokens": cache_1h,
-                        "web_searches": ws,
-                    }
-                    at = seen_request_ids.get(req_id)
-                    if at is None:
-                        seen_request_ids[req_id] = len(requests)
-                        requests.append(row)
-                    else:
-                        prev = requests[at]
-                        for k, v in row.items():
-                            if isinstance(v, (int, float)) and not isinstance(v, bool):
-                                prev[k] = max(prev.get(k, 0) or 0, v)
-                        if not prev.get("timestamp") and timestamp:
-                            prev["timestamp"] = timestamp
-        except Exception:
-            pass
-
-        return {
-            "sessionId": session_id,
-            "requests": requests,
-            "firstUserPrompt": first_user_prompt,
-            "gitBranch": git_branch,
-        }
+    def _first_prompt(self, fp, e):
+        """First prompt of a file: from memory, else re-read from its line offset."""
+        if fp in self._prompts:
+            return self._prompts[fp]
+        text = ""
+        if e["promptAt"] >= 0:
+            try:
+                with open(fp, "rb") as f:
+                    f.seek(e["promptAt"])
+                    entry = json.loads(f.readline())
+                if isinstance(entry, dict):
+                    text = _first_prompt_of(entry)
+            except (OSError, ValueError):
+                pass
+        self._prompts[fp] = text
+        return text
 
     def _parse_session_detail(self, filepath):
         """Parse a session file for detailed per-request view."""
-        parsed = self._parse_session_file(filepath)
+        parsed = parse_transcript(filepath)
         detail_requests = []
-        for req in parsed["requests"]:
-            cost = _compute_cost_from_req(req)
+        for r in parsed["reqs"]:
+            cost = _compute_cost_from_req(_row_to_req(r))
             detail_requests.append({
-                "requestId": req["requestId"],
-                "model": req["model"],
-                "modelDisplay": model_display_name(req["model"]),
-                "timestamp": req["timestamp"],
-                "inputTokens": req["input_tokens"],
-                "outputTokens": req["output_tokens"],
-                "cacheReadTokens": req["cache_read_input_tokens"],
-                "cacheWriteTokens": req["cache_creation_input_tokens"],
+                "requestId": r[R_RID],
+                "model": r[R_MODEL],
+                "modelDisplay": model_display_name(r[R_MODEL]),
+                "timestamp": _ms_to_iso(r[R_TS]),
+                "inputTokens": r[R_IN],
+                "outputTokens": r[R_OUT],
+                "cacheReadTokens": r[R_CR],
+                "cacheWriteTokens": r[R_CW],
                 "costUSD": round(cost, 4),
             })
         return {
-            "sessionId": parsed["sessionId"],
+            "sessionId": parsed["sid"],
             "requests": detail_requests,
         }
 
     def _aggregate(self, all_projects, all_sessions_meta):
-        # Global requestId tracking for deduplication (take max usage across copies)
-        global_rid_usage = {}  # rid -> {input, output, cache_read, cache_write, model, timestamp}
+        # Session files that hold at least one request, in project order
+        sess = []  # (proj, path, entry, first_ts_ms, last_ts_ms)
+        for proj in all_projects:
+            for fp in proj["jsonlFiles"]:
+                e = self._files.get(fp)
+                if not e or not e["reqs"]:
+                    continue
+                stamps = [r[R_TS] for r in e["reqs"] if r[R_TS]]
+                sess.append((proj, fp, e, min(stamps) if stamps else 0, max(stamps) if stamps else 0))
+
+        # One row per requestId across ALL files. A resumed session's transcript repeats the
+        # earlier requests: each counts once, with the largest value of every field and the
+        # earliest timestamp. It is credited to the earliest file holding it (by first request
+        # time, then mtime), so sessions and projects add up to the totals.
+        order = sorted(range(len(sess)), key=lambda i: (sess[i][3] or float("inf"), sess[i][2]["mtime"], sess[i][1]))
+        uniq = {}  # rid -> [model, ts, in, out, cr, cw, c5, c1, ws, owner]
+        for i in order:
+            for r in sess[i][2]["reqs"]:
+                cur = uniq.get(r[R_RID])
+                if cur is None:
+                    cur = r[1:]
+                    cur.append(i)
+                    uniq[r[R_RID]] = cur
+                else:
+                    ts = r[R_TS]
+                    if ts and (not cur[1] or ts < cur[1]):
+                        cur[1] = ts
+                    for k in range(2, 9):
+                        if r[k + 1] > cur[k]:
+                            cur[k] = r[k + 1]
 
         # Accumulators
         total_input = 0
@@ -398,8 +566,6 @@ class DataCollector:
         total_cache_write = 0
         total_cost = 0.0
         total_no_cache_cost = 0.0
-        total_requests = 0
-        total_sessions = 0
         total_web_searches = 0
 
         daily = defaultdict(lambda: {
@@ -416,6 +582,71 @@ class DataCollector:
         hourly_counts = defaultdict(int)
         hourly_tokens = defaultdict(int)
         dow_counts = defaultdict(int)
+        local_minute = {}  # minute since epoch -> (local date, hour, weekday)
+
+        sess_sums = [[0, 0, 0, 0, 0.0, 0] for _ in sess]  # in, out, cache read, cache write, cost, requests
+
+        first_date = None
+        last_date = None
+
+        for model, ts, inp, out, cr, cw, c5, c1, ws, owner in uniq.values():
+            req = {"model": model, "input_tokens": inp, "output_tokens": out,
+                   "cache_read_input_tokens": cr, "cache_creation_input_tokens": cw,
+                   "web_searches": ws}
+            cost = _compute_cost_from_req(req)
+            no_cache_cost = _compute_no_cache_cost_from_req(req)
+
+            total_input += inp
+            total_output += out
+            total_cache_read += cr
+            total_cache_write += cw
+            total_cost += cost
+            total_no_cache_cost += no_cache_cost
+            total_web_searches += ws
+
+            s = sess_sums[owner]
+            s[0] += inp
+            s[1] += out
+            s[2] += cr
+            s[3] += cw
+            s[4] += cost
+            s[5] += 1
+
+            # Daily and hourly, by local time
+            if ts:
+                minute = ts // 60000
+                loc = local_minute.get(minute)
+                if loc is None:
+                    dt = datetime.fromtimestamp(minute * 60)
+                    loc = local_minute[minute] = (dt.strftime("%Y-%m-%d"), dt.hour, dt.weekday())
+                date_str, hour, weekday = loc
+                d = daily[date_str]
+                d["inputTokens"] += inp
+                d["outputTokens"] += out
+                d["cacheReadTokens"] += cr
+                d["cacheWriteTokens"] += cw
+                d["costUSD"] += cost
+                d["requestCount"] += 1
+
+                if not first_date or date_str < first_date:
+                    first_date = date_str
+                if not last_date or date_str > last_date:
+                    last_date = date_str
+
+                hourly_counts[hour] += 1
+                hourly_tokens[hour] += inp + out + cr + cw
+                dow_counts[weekday] += 1
+
+            # Model
+            m = models[model]
+            m["inputTokens"] += inp
+            m["outputTokens"] += out
+            m["cacheReadTokens"] += cr
+            m["cacheWriteTokens"] += cw
+            m["costUSD"] += cost
+            m["noCacheCostUSD"] += no_cache_cost
+            m["requestCount"] += 1
+            m["webSearches"] += ws
 
         sessions_list = []
         project_agg = defaultdict(lambda: {
@@ -424,170 +655,48 @@ class DataCollector:
             "requestCount": 0, "firstDate": None, "lastDate": None,
         })
 
-        first_date = None
-        last_date = None
+        for i, (proj, fp, e, first_ts, last_ts) in enumerate(sess):
+            s_in, s_out, s_cr, s_cw, s_cost, s_reqs = sess_sums[i]
+            sid = e["sid"] or Path(fp).stem
+            meta = all_sessions_meta.get(sid, {})
+            sess_first_ts = _ms_to_iso(first_ts)
+            sess_last_ts = _ms_to_iso(last_ts)
 
-        for proj in all_projects:
-            proj_name = proj["dirName"]
-            proj_display = proj["displayName"]
-            proj_original = proj["originalPath"]
+            # Project aggregation
+            pa = project_agg[proj["dirName"]]
+            pa["sessionCount"] += 1
+            pa["inputTokens"] += s_in
+            pa["outputTokens"] += s_out
+            pa["cacheReadTokens"] += s_cr
+            pa["cacheWriteTokens"] += s_cw
+            pa["costUSD"] += s_cost
+            pa["requestCount"] += s_reqs
+            sess_date = sess_first_ts[:10]
+            if sess_date:
+                if not pa["firstDate"] or sess_date < pa["firstDate"]:
+                    pa["firstDate"] = sess_date
+                if not pa["lastDate"] or sess_date > pa["lastDate"]:
+                    pa["lastDate"] = sess_date
 
-            for fp in proj["jsonlFiles"]:
-                parsed = self._parsed_files.get(fp)
-                if not parsed or not parsed["requests"]:
-                    continue
-
-                total_sessions += 1
-                sid = parsed["sessionId"] or fp.stem
-                meta = all_sessions_meta.get(sid, {})
-
-                sess_input = 0
-                sess_output = 0
-                sess_cache_read = 0
-                sess_cache_write = 0
-                sess_cost = 0.0
-                sess_first_ts = None
-                sess_last_ts = None
-
-                for req in parsed["requests"]:
-                    rid = req.get("requestId")
-                    model = req["model"]
-                    inp = req["input_tokens"]
-                    out = req["output_tokens"]
-                    cr = req["cache_read_input_tokens"]
-                    cw = req["cache_creation_input_tokens"]
-                    ws = req.get("web_searches", 0)
-
-                    # Global dedupe: track max usage per requestId
-                    if rid not in global_rid_usage:
-                        global_rid_usage[rid] = {
-                            "input": inp, "output": out, "cache_read": cr, "cache_write": cw,
-                            "model": model, "timestamp": req.get("timestamp", ""), "ws": ws
-                        }
-                    else:
-                        # Take max of each field
-                        prev = global_rid_usage[rid]
-                        global_rid_usage[rid] = {
-                            "input": max(prev["input"], inp),
-                            "output": max(prev["output"], out),
-                            "cache_read": max(prev["cache_read"], cr),
-                            "cache_write": max(prev["cache_write"], cw),
-                            "model": model,
-                            "timestamp": min(prev["timestamp"], req.get("timestamp", "")) if prev["timestamp"] and req.get("timestamp") else (prev["timestamp"] or req.get("timestamp", "")),
-                            "ws": max(prev["ws"], ws)
-                        }
-
-                    # Use the deduplicated values
-                    dedup_vals = global_rid_usage[rid]
-                    inp = dedup_vals["input"]
-                    out = dedup_vals["output"]
-                    cr = dedup_vals["cache_read"]
-                    cw = dedup_vals["cache_write"]
-                    ws = dedup_vals["ws"]
-                    cost = _compute_cost_from_req({"input_tokens": inp, "output_tokens": out, "cache_read_input_tokens": cr, "cache_creation_input_tokens": cw, "model": model, "web_searches": ws})
-                    no_cache_cost = _compute_no_cache_cost_from_req({"input_tokens": inp, "output_tokens": out, "cache_read_input_tokens": cr, "cache_creation_input_tokens": cw, "model": model})
-
-                    total_input += inp
-                    total_output += out
-                    total_cache_read += cr
-                    total_cache_write += cw
-                    total_cost += cost
-                    total_no_cache_cost += no_cache_cost
-                    total_requests += 1
-                    total_web_searches += ws
-
-                    sess_input += inp
-                    sess_output += out
-                    sess_cache_read += cr
-                    sess_cache_write += cw
-                    sess_cost += cost
-
-                    # Daily (convert UTC timestamp to local date)
-                    ts = req["timestamp"]
-                    date_str = ""
-                    if ts:
-                        try:
-                            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                            date_str = dt.astimezone().strftime("%Y-%m-%d")
-                        except Exception:
-                            date_str = ts[:10]
-                    if date_str:
-                        d = daily[date_str]
-                        d["inputTokens"] += inp
-                        d["outputTokens"] += out
-                        d["cacheReadTokens"] += cr
-                        d["cacheWriteTokens"] += cw
-                        d["costUSD"] += cost
-                        d["requestCount"] += 1
-
-                        # Track date range
-                        if not first_date or date_str < first_date:
-                            first_date = date_str
-                        if not last_date or date_str > last_date:
-                            last_date = date_str
-
-                        # Hourly
-                        try:
-                            dt = datetime.fromisoformat(ts.replace("Z", "+00:00"))
-                            local_dt = dt.astimezone()
-                            hour = local_dt.hour
-                            hourly_counts[hour] += 1
-                            hourly_tokens[hour] += inp + out + cr + cw
-                            dow_counts[local_dt.weekday()] += 1
-                        except Exception:
-                            pass
-
-                    # Model
-                    m = models[model]
-                    m["inputTokens"] += inp
-                    m["outputTokens"] += out
-                    m["cacheReadTokens"] += cr
-                    m["cacheWriteTokens"] += cw
-                    m["costUSD"] += cost
-                    m["noCacheCostUSD"] += no_cache_cost
-                    m["requestCount"] += 1
-                    m["webSearches"] += ws
-
-                    if not sess_first_ts or ts < sess_first_ts:
-                        sess_first_ts = ts
-                    if not sess_last_ts or ts > sess_last_ts:
-                        sess_last_ts = ts
-
-                # Project aggregation
-                pa = project_agg[proj_name]
-                pa["sessionCount"] += 1
-                pa["inputTokens"] += sess_input
-                pa["outputTokens"] += sess_output
-                pa["cacheReadTokens"] += sess_cache_read
-                pa["cacheWriteTokens"] += sess_cache_write
-                pa["costUSD"] += sess_cost
-                pa["requestCount"] += len(parsed["requests"])
-                sess_date = (sess_first_ts or "")[:10]
-                if sess_date:
-                    if not pa["firstDate"] or sess_date < pa["firstDate"]:
-                        pa["firstDate"] = sess_date
-                    if not pa["lastDate"] or sess_date > pa["lastDate"]:
-                        pa["lastDate"] = sess_date
-
-                # Session entry
-                first_prompt = meta.get("firstPrompt", "") or parsed.get("firstUserPrompt", "")
-                sessions_list.append({
-                    "sessionId": sid,
-                    "projectPath": proj_original,
-                    "projectName": proj_display,
-                    "projectDirName": proj_name,
-                    "firstPrompt": first_prompt[:200] if first_prompt else "",
-                    "created": meta.get("created", sess_first_ts or ""),
-                    "modified": meta.get("modified", sess_last_ts or ""),
-                    "gitBranch": meta.get("gitBranch", parsed.get("gitBranch", "")),
-                    "messageCount": meta.get("messageCount", 0),
-                    "requestCount": len(parsed["requests"]),
-                    "inputTokens": sess_input,
-                    "outputTokens": sess_output,
-                    "cacheReadTokens": sess_cache_read,
-                    "cacheWriteTokens": sess_cache_write,
-                    "costUSD": round(sess_cost, 4),
-                })
+            # Session entry
+            first_prompt = meta.get("firstPrompt", "") or self._first_prompt(fp, e)
+            sessions_list.append({
+                "sessionId": sid,
+                "projectPath": proj["originalPath"],
+                "projectName": proj["displayName"],
+                "projectDirName": proj["dirName"],
+                "firstPrompt": first_prompt[:200] if first_prompt else "",
+                "created": meta.get("created", sess_first_ts),
+                "modified": meta.get("modified", sess_last_ts),
+                "gitBranch": meta.get("gitBranch", e["branch"]),
+                "messageCount": meta.get("messageCount", 0),
+                "requestCount": s_reqs,
+                "inputTokens": s_in,
+                "outputTokens": s_out,
+                "cacheReadTokens": s_cr,
+                "cacheWriteTokens": s_cw,
+                "costUSD": round(s_cost, 4),
+            })
 
         # Sort sessions by created date descending
         sessions_list.sort(key=lambda s: s.get("created", ""), reverse=True)
@@ -627,19 +736,13 @@ class DataCollector:
 
         # Build projects list
         projects_list = []
+        proj_by_name = {p["dirName"]: p for p in all_projects}
         for pname, pa in project_agg.items():
-            # Find original path
-            orig = ""
-            disp = pname
-            for proj in all_projects:
-                if proj["dirName"] == pname:
-                    orig = proj["originalPath"]
-                    disp = proj["displayName"]
-                    break
+            proj = proj_by_name[pname]
             projects_list.append({
                 "projectDirName": pname,
-                "originalPath": orig,
-                "displayName": disp,
+                "originalPath": proj["originalPath"],
+                "displayName": proj["displayName"],
                 "sessionCount": pa["sessionCount"],
                 "inputTokens": pa["inputTokens"],
                 "outputTokens": pa["outputTokens"],
@@ -667,12 +770,13 @@ class DataCollector:
                 "estimatedCostUSD": round(total_cost, 2),
                 "costWithoutCache": round(total_no_cache_cost, 2),
                 "savingsUSD": round(total_no_cache_cost - total_cost, 2),
-                "totalSessions": total_sessions,
-                "totalRequests": total_requests,
+                "totalSessions": len(sess),
+                "totalRequests": len(uniq),
                 "totalWebSearches": total_web_searches,
                 "firstDate": first_date,
                 "lastDate": last_date,
-                "projectCount": len(all_projects),
+                # Projects with usage (there are hundreds of empty benchmark project folders)
+                "projectCount": len(projects_list),
                 "cacheHitRate": round(cache_hit_rate, 1),
             },
             "daily": daily_list,
@@ -813,7 +917,9 @@ def main():
     collector = DataCollector()
     print("Parsing Claude Code session data...")
     collector.get_data()
-    print("Data loaded.")
+    lr = collector.last_refresh
+    print(f"Data loaded in {lr['seconds']}s: {lr['parsed']} of {lr['files']} transcript files parsed, "
+          f"the rest from {CACHE_FILE.name}.")
 
     DashboardHandler.collector = collector
     server = HTTPServer(("127.0.0.1", PORT), DashboardHandler)
@@ -830,6 +936,7 @@ def main():
         server.serve_forever()
     except KeyboardInterrupt:
         print("\nShutting down.")
+        collector.save_cache()
         server.shutdown()
 
 

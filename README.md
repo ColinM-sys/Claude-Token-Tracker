@@ -33,7 +33,8 @@ Claude Code stores session data as JSONL files in `~/.claude/projects/`. The tra
 
 1. **Recursively scans** all session files in `~/.claude/projects/` (including subagent transcripts in `<session-id>/subagents/workflows/` directories)
 2. Parses each JSONL file to extract token usage per request (input, output, cache read, cache write)
-3. **Deduplicates** requestIds globally — resumed sessions create duplicate requestIds across transcript copies, tracker takes max usage to avoid double-counting
+   - Per-file results are kept in `token_cache.json` next to `server.py` (gitignored; per-request token counts, ids and timestamps, never message text), keyed by file size and modification time, so a restart or refresh re-reads only new or changed transcripts. Delete the file to force a full re-read.
+3. **Deduplicates** requestIds globally — resumed sessions create duplicate requestIds across transcript copies; each request is counted once, with the max of each field, and credited to the earliest session that holds it
 4. Computes estimated API costs using current Anthropic pricing (Opus 5, Sonnet 5, Fable 5, Haiku 4.5 tiers)
 5. Serves a single-page dashboard on `localhost:8050` with interactive Chart.js visualizations
 
