@@ -590,9 +590,11 @@ class DataCollector:
         last_date = None
 
         for model, ts, inp, out, cr, cw, c5, c1, ws, owner in uniq.values():
+            # Price 5-minute and 1-hour cache writes at their own rates (as the session
+            # drill-down does); without the split all writes were billed at the 5-minute rate.
             req = {"model": model, "input_tokens": inp, "output_tokens": out,
                    "cache_read_input_tokens": cr, "cache_creation_input_tokens": cw,
-                   "web_searches": ws}
+                   "cache_5m_tokens": c5, "cache_1h_tokens": c1, "web_searches": ws}
             cost = _compute_cost_from_req(req)
             no_cache_cost = _compute_no_cache_cost_from_req(req)
 
